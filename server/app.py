@@ -8,7 +8,8 @@ from fastapi.responses import ORJSONResponse
 import logging
 
 from .config import Settings
-from .routers import upload, ws
+from .routers import upload, ws, rag, sessions
+from .services.rag import rag_engine
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -37,6 +38,8 @@ app.add_middleware(
 )
 
 app.include_router(upload.router, prefix="/api", tags=["upload"])
+app.include_router(rag.router, prefix="/api/rag", tags=["rag"])
+app.include_router(sessions.router, prefix="/api", tags=["sessions"])
 app.include_router(ws.router, tags=["ws"])
 
 
@@ -70,3 +73,4 @@ async def on_startup() -> None:
         getattr(settings, "PIPER_VOICE_EN", None),
         getattr(settings, "PIPER_VOICE_RU", None),
     )
+    await rag_engine.initialize(settings)

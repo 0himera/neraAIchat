@@ -7,6 +7,8 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from ..config import Settings
 from ..services.llm import stream_chat
+from ..services.rag import rag_engine
+from ..services.sessions import sessions_manager
 from ..services.asr import transcribe_opus
 from ..services.tts import synthesize_ogg_opus, synthesize_wav
 import logging
@@ -71,22 +73,80 @@ async def ws_llm(ws: WebSocket):
                 payload = {"text": raw}
 
             user_text = (payload.get("text") or "").strip()
+            session_id = (payload.get("session_id") or "").strip()
+            user_message_id = (payload.get("message_id") or "").strip() or None
+            assistant_message_id = (payload.get("assistant_id") or "").strip() or None
             if not user_text:
                 await ws.send_json({"type": "error", "message": "empty input"})
                 continue
 
+            if not session_id:
+                await ws.send_json({"type": "error", "message": "session_id required"})
+                continue
+
+            try:
+                await sessions_manager.ensure_session(session_id)
+            except ValueError:
+                await ws.send_json({"type": "error", "message": "session not found"})
+                continue
+
+            try:
+                append_result = await sessions_manager.append_message(
+                    session_id,
+                    {"role": "user", "text": user_text, "id": user_message_id} if user_message_id else {"role": "user", "text": user_text},
+                )
+                await ws.send_json({"type": "session_update", "session": append_result["session"], "message": append_result["message"]})
+            except Exception as e:
+                logger.exception("/ws/llm failed to persist user message: %s", e)
+                await ws.send_json({"type": "error", "message": "failed to store message"})
+                continue
+
+            context_chunks = []
+            try:
+                await rag_engine.ensure_initialized(settings)
+                context_chunks = await rag_engine.query(user_text, settings, top_k=5)
+            except Exception as e:
+                logger.exception("/ws/llm RAG retrieval failed: %s", e)
+                context_chunks = []
+
             # Stream tokens from OpenRouter via our proxy service
             try:
                 logger.info("/ws/llm streaming start: model=%s url=%s", settings.LLM_MODEL, settings.OPENROUTER_API_URL)
-                async for token in stream_chat(user_text, settings):
+                assistant_reply = ""
+                async for token in stream_chat(user_text, settings, context_chunks=context_chunks):
                     if token:
-                        await ws.send_json({"type": "token", "text": token})
+                        assistant_reply += token
+                        await ws.send_json({
+                            "type": "token",
+                            "text": token,
+                        })
                 await ws.send_json({"type": "done"})
+                if assistant_reply.strip():
+                    try:
+                        append_result = await sessions_manager.append_message(
+                            session_id,
+                            {"role": "assistant", "text": assistant_reply, "id": assistant_message_id}
+                            if assistant_message_id
+                            else {"role": "assistant", "text": assistant_reply},
+                        )
+                        await ws.send_json({"type": "session_update", "session": append_result["session"], "message": append_result["message"]})
+                    except Exception as e:
+                        logger.exception("/ws/llm failed to persist assistant message: %s", e)
             except Exception as e:
                 # Fallback: simple echo to avoid total failure
                 logger.exception("/ws/llm streaming failed, falling back to echo: %s", e)
                 await ws.send_json({"type": "token", "text": user_text})
                 await ws.send_json({"type": "done"})
+                try:
+                    append_result = await sessions_manager.append_message(
+                        session_id,
+                        {"role": "assistant", "text": user_text, "id": assistant_message_id}
+                        if assistant_message_id
+                        else {"role": "assistant", "text": user_text},
+                    )
+                    await ws.send_json({"type": "session_update", "session": append_result["session"], "message": append_result["message"]})
+                except Exception as e2:
+                    logger.exception("/ws/llm fallback persist failed: %s", e2)
     except WebSocketDisconnect:
         logger.info("/ws/llm disconnect")
         return

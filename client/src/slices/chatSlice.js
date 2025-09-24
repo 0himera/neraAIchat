@@ -1,9 +1,7 @@
 import { createSlice, nanoid } from '@reduxjs/toolkit'
 
 const initialState = {
-  messages: [
-    { id: nanoid(), role: 'system', text: 'Welcome! Use mic or type to chat. Upload PDFs to enable RAG.' },
-  ],
+  messages: [],
   partialAsr: '',
 }
 
@@ -15,16 +13,30 @@ const chatSlice = createSlice({
       reducer(state, action) {
         state.messages.push(action.payload)
       },
-      prepare(text) {
-        return { payload: { id: nanoid(), role: 'user', text } }
+      prepare(text, id) {
+        return {
+          payload: {
+            id: id || nanoid(),
+            role: 'user',
+            text,
+            created_at: new Date().toISOString(),
+          },
+        }
       },
     },
     addAssistantMessage: {
       reducer(state, action) {
         state.messages.push(action.payload)
       },
-      prepare(text) {
-        return { payload: { id: nanoid(), role: 'assistant', text } }
+      prepare(text, id) {
+        return {
+          payload: {
+            id: id || nanoid(),
+            role: 'assistant',
+            text,
+            created_at: new Date().toISOString(),
+          },
+        }
       },
     },
     setPartialAsr(state, action) {
@@ -39,8 +51,41 @@ const chatSlice = createSlice({
         }
       }
     },
+    setMessages(state, action) {
+      state.messages = action.payload || []
+    },
+    clearMessages(state) {
+      state.messages = []
+      state.partialAsr = ''
+    },
+    upsertMessage(state, action) {
+      const msg = action.payload
+      if (!msg || !msg.id) return
+      const idx = state.messages.findIndex(m => m.id === msg.id)
+      if (idx >= 0) {
+        state.messages[idx] = { ...state.messages[idx], ...msg }
+      } else {
+        state.messages.push(msg)
+      }
+    },
+    updateMessage(state, action) {
+      const { id, text } = action.payload || {}
+      if (!id) return
+      const msg = state.messages.find(m => m.id === id)
+      if (!msg) return
+      if (text !== undefined) msg.text = text
+    },
   },
 })
 
-export const { addUserMessage, addAssistantMessage, setPartialAsr, replaceLastAssistant } = chatSlice.actions
+export const {
+  addUserMessage,
+  addAssistantMessage,
+  setPartialAsr,
+  replaceLastAssistant,
+  setMessages,
+  clearMessages,
+  upsertMessage,
+  updateMessage,
+} = chatSlice.actions
 export default chatSlice.reducer

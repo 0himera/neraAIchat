@@ -1,6 +1,9 @@
 import React, { useState } from 'react'
 
-export default function PDFUploader() {
+const API_URL = 'http://localhost:8000/api/rag/documents'
+const ACCEPTED_TYPES = '.pdf,.txt,.md,.markdown,.json'
+
+export default function DocumentUploader() {
   const [status, setStatus] = useState('')
 
   const onChange = async (e) => {
@@ -8,21 +11,27 @@ export default function PDFUploader() {
     if (!file) return
     const fd = new FormData()
     fd.append('file', file)
-    setStatus('Uploading...')
+    setStatus(`Uploading ${file.name}...`)
     try {
-      const res = await fetch('http://localhost:8000/api/upload/pdf', { method: 'POST', body: fd })
-      if (!res.ok) throw new Error(await res.text())
+      const res = await fetch(API_URL, { method: 'POST', body: fd })
+      if (!res.ok) {
+        const text = await res.text()
+        throw new Error(text || res.statusText)
+      }
       const data = await res.json()
-      setStatus(`Uploaded: ${data.filename} (doc_id=${data.doc_id})`)
+      setStatus(`Indexed ${data.filename} (chunks=${data.chunks})`)
     } catch (err) {
-      setStatus(`Error: ${err}`)
+      setStatus(`Error: ${err.message || err}`)
+    } finally {
+      e.target.value = ''
     }
   }
 
   return (
     <div className="card">
-      <div className="card-title">PDF Upload</div>
-      <input type="file" accept="application/pdf" onChange={onChange} />
+      <div className="card-title">Document Upload</div>
+      <div className="card-subtitle">Supports PDF, TXT, Markdown, JSON</div>
+      <input type="file" accept={ACCEPTED_TYPES} onChange={onChange} />
       <div className="status">{status}</div>
     </div>
   )

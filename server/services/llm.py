@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Iterable, Sequence
 
 import httpx
 import logging
 
 from ..config import Settings
+from .rag import RAGChunk
 
 
 SYSTEM_PROMPT = (
@@ -18,14 +19,42 @@ SYSTEM_PROMPT = (
 
 logger = logging.getLogger(__name__)
 
-async def stream_chat(user_text: str, settings: Settings) -> AsyncGenerator[str, None]:
+MAX_CONTEXT_SNIPPET_CHARS = 1200
+
+
+def _format_rag_context(chunks: Sequence[RAGChunk]) -> str:
+    snippets = []
+    for idx, chunk in enumerate(chunks, start=1):
+        text = (chunk.text or "").strip()
+        if not text:
+            continue
+        if len(text) > MAX_CONTEXT_SNIPPET_CHARS:
+            text = text[:MAX_CONTEXT_SNIPPET_CHARS].rstrip() + "…"
+        snippets.append(
+            f"[{idx}] Source: {chunk.filename} (chunk {chunk.chunk_index})\n{text}"
+        )
+    return "\n\n".join(snippets)
+
+
+async def stream_chat(
+    user_text: str,
+    settings: Settings,
+    *,
+    context_chunks: Sequence[RAGChunk] | None = None,
+) -> AsyncGenerator[str, None]:
     """
     Proxy streamed chat completion from OpenRouter and yield text tokens.
     """
     if not settings.OPENROUTER_API_KEY:
         logger.warning("stream_chat: OPENROUTER_API_KEY missing; falling back to echo tokenization")
         # No key present; fallback to echoing back the text token-by-token
-        for ch in user_text:
+        context_header = ""
+        if context_chunks:
+            context_header = _format_rag_context(context_chunks)
+        fallback_text = user_text
+        if context_header:
+            fallback_text = context_header + "\n\nUser Question:\n" + user_text
+        for ch in fallback_text:
             yield ch
             await asyncio.sleep(0.005)
         return
@@ -39,13 +68,27 @@ async def stream_chat(user_text: str, settings: Settings) -> AsyncGenerator[str,
         "X-Title": "NeraAIchat",
     }
 
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+    ]
+    if context_chunks:
+        context_blob = _format_rag_context(context_chunks)
+        if context_blob:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "Relevant document snippets (use for grounding, cite as [Source: filename, chunk index]):\n"
+                        + context_blob
+                    ),
+                }
+            )
+    messages.append({"role": "user", "content": user_text})
+
     payload = {
         "model": settings.LLM_MODEL,
         "stream": True,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_text},
-        ],
+        "messages": messages,
     }
 
     timeout = httpx.Timeout(30.0, read=60.0)
