@@ -1,6 +1,6 @@
 # NeraAIchat
 
-Local voice chat with PDF RAG, LLM, and TTS
+Local voice chat with RAG, LLM, and TTS
 
 ## Stack
 - Backend: FastAPI (Python 3.11), WebSocket + REST
@@ -11,7 +11,7 @@ Local voice chat with PDF RAG, LLM, and TTS
 - Storage: JSON (ORJSON), local folders under `server/data/`
 - Frontend: React 18 + Vite + Redux, WebSocket streaming, dark theme
 
-## Prerequisites (Windows 10)
+## Prerequisites 
 - Python 3.11
 - Node.js 18+
 - CUDA 12.3 (installed) for GPU inference
