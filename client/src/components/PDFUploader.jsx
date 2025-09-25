@@ -31,7 +31,10 @@ export default function DocumentUploader() {
     <div className="card">
       <div className="card-title">Document Upload</div>
       <div className="card-subtitle">Supports PDF, TXT, Markdown, JSON</div>
-      <input type="file" accept={ACCEPTED_TYPES} onChange={onChange} />
+      <label className="glass-input">
+        <span>Browse</span>
+        <input className="file-hidden" type="file" accept={ACCEPTED_TYPES} onChange={onChange} />
+      </label>
       <div className="status">{status}</div>
     </div>
   )

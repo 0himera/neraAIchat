@@ -173,12 +173,11 @@ export default function App() {
         <section className="center">
           <ChatWindow />
           <div className="input-row">
-            <VoiceRecorder />
-            <LlmInput />
+            <LlmInput voiceButton={<VoiceRecorder variant="button" />} />
           </div>
         </section>
 
-        <aside className="right">
+        <aside className="right glass-scroll">
           <DocumentUploader />
           <SettingsPanel />
           <TTSPlayer />

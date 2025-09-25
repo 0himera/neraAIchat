@@ -4,7 +4,7 @@ import { setPartialAsr } from '../slices/chatSlice.js'
 
 const WS_URL = 'ws://localhost:8000/ws/asr'
 
-export default function VoiceRecorder() {
+export default function VoiceRecorder({ variant = 'card' }) {
   const dispatch = useDispatch()
   const chunkMs = useSelector(s => s.settings.chunkMs)
   const [recording, setRecording] = useState(false)
@@ -53,6 +53,18 @@ export default function VoiceRecorder() {
     if (mrRef.current && mrRef.current.state !== 'inactive') mrRef.current.stop()
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) wsRef.current.send('final')
     setRecording(false)
+  }
+
+  if (variant === 'button') {
+    return (
+      <button
+        type="button"
+        className={`glass-input voice-button ${recording ? 'active' : ''}`}
+        onClick={recording ? stop : start}
+      >
+        {recording ? 'Stop mic' : 'Voice'}
+      </button>
+    )
   }
 
   return (

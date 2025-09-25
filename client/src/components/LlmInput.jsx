@@ -11,7 +11,7 @@ import { upsertSession } from '../slices/sessionsSlice.js'
 
 const WS_URL = 'ws://localhost:8000/ws/llm'
 
-export default function LlmInput() {
+export default function LlmInput({ voiceButton = null }) {
   const [text, setText] = useState('')
   const dispatch = useDispatch()
   const wsRef = useRef(null)
@@ -71,15 +71,18 @@ export default function LlmInput() {
   }
 
   return (
-    <div className="row grow">
+    <div className="input-bar">
       <input
-        className="input"
+        className="glass-field chat-input"
         placeholder="Type your message..."
         value={text}
         onChange={e => setText(e.target.value)}
         onKeyDown={e => e.key === 'Enter' && send()}
       />
-      <button className="btn" onClick={send}>Send</button>
+      <button type="button" className="glass-input send-button" onClick={send}>
+        Send
+      </button>
+      {voiceButton}
     </div>
   )
 }
