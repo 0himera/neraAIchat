@@ -64,9 +64,28 @@ async def ws_asr(ws: WebSocket):
 async def ws_llm(ws: WebSocket):
     await ws.accept()
     settings = Settings()
+
+    async def safe_send_json(payload: dict[str, Any]) -> bool:
+        try:
+            await ws.send_json(payload)
+            return True
+        except WebSocketDisconnect:
+            logger.info("/ws/llm client disconnected during send")
+            return False
+        except RuntimeError as exc:
+            logger.debug("/ws/llm failed to send payload due to runtime error: %s", exc)
+            return False
+
     try:
         while True:
-            raw = await ws.receive_text()
+            try:
+                raw = await ws.receive_text()
+            except WebSocketDisconnect:
+                logger.info("/ws/llm disconnect during receive")
+                break
+            except RuntimeError as exc:
+                logger.debug("/ws/llm receive failed due to runtime error: %s", exc)
+                break
             try:
                 payload = json.loads(raw)
             except json.JSONDecodeError:
@@ -113,15 +132,16 @@ async def ws_llm(ws: WebSocket):
             try:
                 logger.info("/ws/llm streaming start: model=%s url=%s", settings.LLM_MODEL, settings.OPENROUTER_API_URL)
                 assistant_reply = ""
+                stream_ok = True
                 async for token in stream_chat(user_text, settings, context_chunks=context_chunks):
                     if token:
                         assistant_reply += token
-                        await ws.send_json({
-                            "type": "token",
-                            "text": token,
-                        })
-                await ws.send_json({"type": "done"})
-                if assistant_reply.strip():
+                        if not await safe_send_json({"type": "token", "text": token}):
+                            stream_ok = False
+                            break
+                if stream_ok:
+                    stream_ok = await safe_send_json({"type": "done"})
+                if stream_ok and assistant_reply.strip():
                     try:
                         append_result = await sessions_manager.append_message(
                             session_id,
@@ -129,14 +149,14 @@ async def ws_llm(ws: WebSocket):
                             if assistant_message_id
                             else {"role": "assistant", "text": assistant_reply},
                         )
-                        await ws.send_json({"type": "session_update", "session": append_result["session"], "message": append_result["message"]})
+                        await safe_send_json({"type": "session_update", "session": append_result["session"], "message": append_result["message"]})
                     except Exception as e:
                         logger.exception("/ws/llm failed to persist assistant message: %s", e)
             except Exception as e:
                 # Fallback: simple echo to avoid total failure
                 logger.exception("/ws/llm streaming failed, falling back to echo: %s", e)
-                await ws.send_json({"type": "token", "text": user_text})
-                await ws.send_json({"type": "done"})
+                if await safe_send_json({"type": "token", "text": user_text}):
+                    await safe_send_json({"type": "done"})
                 try:
                     append_result = await sessions_manager.append_message(
                         session_id,
@@ -144,7 +164,7 @@ async def ws_llm(ws: WebSocket):
                         if assistant_message_id
                         else {"role": "assistant", "text": user_text},
                     )
-                    await ws.send_json({"type": "session_update", "session": append_result["session"], "message": append_result["message"]})
+                    await safe_send_json({"type": "session_update", "session": append_result["session"], "message": append_result["message"]})
                 except Exception as e2:
                     logger.exception("/ws/llm fallback persist failed: %s", e2)
     except WebSocketDisconnect:
