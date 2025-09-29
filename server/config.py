@@ -12,6 +12,7 @@ class Settings(BaseSettings):
 
     USE_FAISS_GPU: bool = False
     ASR_MODEL: str = "medium"
+    WHISPER_DEVICE: str = "auto"
     SHORT_TERM_MESSAGES: int = 20
 
     MAX_PDF_MB: int = 50

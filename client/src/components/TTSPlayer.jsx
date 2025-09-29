@@ -1,64 +1,63 @@
-import React, { useEffect, useRef, useState } from 'react'
-import { useSelector } from 'react-redux'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { useDispatch, useSelector } from 'react-redux'
+import { enqueueSpeech, setTtsSpeed, setVoiceMode, shiftSpeech } from '../slices/settingsSlice.js'
 
 const WS_URL = 'ws://localhost:8000/ws/tts'
 
 export default function TTSPlayer() {
-  const [text, setText] = useState('Hello from Piper!')
+  const dispatch = useDispatch()
+  const { ttsVoice, voiceMode, ttsSpeed, speechQueue } = useSelector(s => s.settings)
   const [status, setStatus] = useState('')
   const [progress, setProgress] = useState(0)
   const [volume, setVolume] = useState(100)
   const [isPlaying, setIsPlaying] = useState(false)
   const audioRef = useRef(null)
-  const ttsVoice = useSelector(s => s.settings.ttsVoice)
   const codecRef = useRef('audio/ogg; codecs=opus')
+  const activeSpeech = useMemo(() => speechQueue?.[0] || null, [speechQueue])
 
-  const speak = async () => {
-    if (!text.trim()) return
-    setStatus('Synthesis...')
-    setProgress(0)
-    setIsPlaying(false)
-    const ws = new WebSocket(WS_URL)
-    const chunks = []
+  const synthesize = async (text) => {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(WS_URL)
+      const chunks = []
+      ws.binaryType = 'arraybuffer'
 
-    ws.binaryType = 'arraybuffer'
-
-    ws.onopen = () => {
-      ws.send(JSON.stringify({ text, voice: ttsVoice }))
-    }
-
-    ws.onmessage = (ev) => {
-      if (typeof ev.data === 'string') {
-        try {
-          const msg = JSON.parse(ev.data)
-          if (msg.type === 'start') {
-            // Server may send codec: 'ogg/opus' or 'audio/wav'
-            codecRef.current = msg.codec === 'audio/wav' ? 'audio/wav' : 'audio/ogg; codecs=opus'
-            setStatus(`Receiving ${codecRef.current}...`)
-          }
-          if (msg.type === 'end') {
-            const blob = new Blob(chunks, { type: codecRef.current })
-            const url = URL.createObjectURL(blob)
-            const audio = audioRef.current
-            audio.src = url
-            audio.currentTime = 0
-            audio.play()
-            setStatus('Done')
-            ws.close()
-          }
-          if (msg.type === 'error') {
-            setStatus('Error: ' + msg.message)
-          }
-        } catch {
-          // text but not JSON
-        }
-      } else {
-        chunks.push(new Uint8Array(ev.data))
+      ws.onopen = () => {
+        ws.send(JSON.stringify({ text, voice: ttsVoice, speed: ttsSpeed }))
+        setStatus('Synthesis…')
       }
-    }
 
-    ws.onerror = () => setStatus('WS error')
-    ws.onclose = () => {}
+      ws.onmessage = (ev) => {
+        if (typeof ev.data === 'string') {
+          try {
+            const msg = JSON.parse(ev.data)
+            if (msg.type === 'start') {
+              codecRef.current = msg.codec === 'audio/wav' ? 'audio/wav' : 'audio/ogg; codecs=opus'
+              setStatus(`Receiving ${codecRef.current}…`)
+            }
+            if (msg.type === 'end') {
+              const blob = new Blob(chunks, { type: codecRef.current })
+              resolve(blob)
+              ws.close()
+            }
+            if (msg.type === 'error') {
+              reject(new Error(msg.message))
+              ws.close()
+            }
+          } catch (err) {
+            console.warn('tts parse error', err)
+          }
+        } else {
+          chunks.push(new Uint8Array(ev.data))
+        }
+      }
+
+      ws.onerror = () => {
+        reject(new Error('TTS websocket error'))
+        ws.close()
+      }
+
+      ws.onclose = () => {}
+    })
   }
 
   useEffect(() => {
@@ -66,6 +65,41 @@ export default function TTSPlayer() {
     if (!audio) return
     audio.volume = volume / 100
   }, [volume])
+
+  useEffect(() => {
+    const audio = audioRef.current
+    if (!audio) return
+    audio.playbackRate = Number(ttsSpeed) || 1
+  }, [ttsSpeed])
+
+  useEffect(() => {
+    let cancelled = false
+    const audio = audioRef.current
+    if (!voiceMode || !activeSpeech || !audio) return
+
+    const run = async () => {
+      try {
+        setProgress(0)
+        setIsPlaying(false)
+        const blob = await synthesize(activeSpeech.text)
+        if (cancelled) return
+        const url = URL.createObjectURL(blob)
+        audio.src = url
+        audio.currentTime = 0
+        await audio.play()
+      } catch (err) {
+        console.error('TTS synth failed', err)
+        setStatus(`Error: ${err.message}`)
+        dispatch(shiftSpeech())
+      }
+    }
+
+    run()
+
+    return () => {
+      cancelled = true
+    }
+  }, [activeSpeech, voiceMode, dispatch])
 
   const handleTimeUpdate = () => {
     const audio = audioRef.current
@@ -92,19 +126,39 @@ export default function TTSPlayer() {
     }
   }
 
+  const handleVoiceModeToggle = () => {
+    dispatch(setVoiceMode(!voiceMode))
+  }
+
   return (
     <div className="card">
       <div className="card-title">TTS Player</div>
       <div className="settings-group">
-        <span className="settings-label">Prompt</span>
+        <span className="settings-label">Voice Mode</span>
+        <label className="toggle">
+          <input type="checkbox" checked={voiceMode} onChange={handleVoiceModeToggle} />
+          <span className="toggle-track">
+            <span className="toggle-thumb" />
+          </span>
+        </label>
       </div>
-      <div className="row">
-        <input className="glass-field" value={text} onChange={e => setText(e.target.value)} />
-        <button className="glass-input" onClick={speak}>Speak</button>
+      <div className="settings-group">
+        <span className="settings-label">Speed {ttsSpeed.toFixed(2)}×</span>
+        <div className="audio-volume">
+          <input
+            type="range"
+            min="0.5"
+            max="2"
+            step="0.05"
+            value={ttsSpeed}
+            style={{ '--volume-level': `${((ttsSpeed - 0.5) / 1.5) * 100}%` }}
+            onChange={e => dispatch(setTtsSpeed(e.target.value))}
+          />
+        </div>
       </div>
-      <div className="status">{status}</div>
+      <div className="status">{status || (activeSpeech ? `Queue: ${speechQueue.length}` : 'Idle')}</div>
       <div className="audio-player">
-        <button onClick={togglePlayback} aria-label={isPlaying ? 'Pause' : 'Play'}>
+        <button onClick={togglePlayback} aria-label={isPlaying ? 'Pause' : 'Play'} disabled={!activeSpeech}>
           {isPlaying ? '❚❚' : '▶'}
         </button>
         <div className="audio-slider">
@@ -115,6 +169,7 @@ export default function TTSPlayer() {
             value={progress}
             style={{ '--progress': `${progress}%` }}
             onChange={e => handleSeek(e.target.value)}
+            disabled={!activeSpeech}
           />
         </div>
         <div className="audio-volume">
@@ -137,6 +192,7 @@ export default function TTSPlayer() {
         onEnded={() => {
           setIsPlaying(false)
           setProgress(100)
+          dispatch(shiftSpeech())
         }}
         onPlay={() => setIsPlaying(true)}
         onPause={() => setIsPlaying(false)}

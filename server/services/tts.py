@@ -38,7 +38,7 @@ def _resolve_voice_paths(voice_path: str) -> Tuple[str, Optional[str]]:
         return str(model), (str(cfg) if cfg.exists() else None)
 
 
-def _run_piper_cli(text: str, piper_path: str, voice_path: str) -> bytes:
+def _run_piper_cli(text: str, piper_path: str, voice_path: str, speed: Optional[float] = None) -> bytes:
     """Run Piper CLI to synthesize WAV into a temporary file and return its bytes.
     Uses --text with UTF-8 stdin (newline-terminated) for reliability on Windows.
     """
@@ -80,6 +80,9 @@ def _run_piper_cli(text: str, piper_path: str, voice_path: str) -> bytes:
         base = [str(Path(piper_path).resolve()), '--model', str(Path(model_path).resolve())]
         if config_path:
             base += ['-c', str(Path(config_path).resolve())]
+        if speed and speed > 0:
+            length_scale = max(0.25, min(4.0, round(1.0 / speed, 3)))
+            base += ['--length_scale', str(length_scale)]
 
         # Variant 1: --output_file + --text
         cmd1 = base + ['--output_file', str(out_path.resolve()), '--text']
@@ -113,7 +116,7 @@ def _get_piper_voice(model_path: str):
     return voice, lock
 
 
-def _run_piper_python(text: str, voice_path: str) -> bytes:
+def _run_piper_python(text: str, voice_path: str, speed: Optional[float] = None) -> bytes:
     """Use Piper Python API to synthesize WAV into memory and return its bytes."""
     model_path, _ = _resolve_voice_paths(voice_path)
     voice, lock = _get_piper_voice(model_path)
@@ -121,18 +124,21 @@ def _run_piper_python(text: str, voice_path: str) -> bytes:
     # Piper's synthesize writes a proper WAV header/frames to an open wave file
     with lock:
         with wave.open(buf, "wb") as wf:
+            kwargs = {}
+            if speed and speed > 0:
+                kwargs['length_scale'] = max(0.25, min(4.0, 1.0 / speed))
             # PiperVoice.synthesize will configure WAV params and write frames
-            voice.synthesize(text, wf)  # type: ignore[attr-defined]
+            voice.synthesize(text, wf, **kwargs)  # type: ignore[attr-defined]
     return buf.getvalue()
 
 
-def _run_piper(text: str, piper_path: str, voice_path: str) -> bytes:
+def _run_piper(text: str, piper_path: str, voice_path: str, speed: Optional[float] = None) -> bytes:
     """Try Piper Python API first (fast, stable), then fall back to CLI."""
     try:
-        return _run_piper_python(text, voice_path)
+        return _run_piper_python(text, voice_path, speed=speed)
     except Exception:
         # Fall back to CLI path
-        return _run_piper_cli(text, piper_path, voice_path)
+        return _run_piper_cli(text, piper_path, voice_path, speed=speed)
 
 
 def _wav_to_ogg_opus(wav_bytes: bytes, ffmpeg_path: str) -> bytes:
@@ -227,14 +233,14 @@ def _pcm_to_ogg_opus(pcm_bytes: bytes, ffmpeg_path: str, sr_candidates: tuple[in
     raise RuntimeError(msg)
 
 
-def synthesize_ogg_opus(text: str, settings: Settings, voice: Optional[str] = None) -> bytes:
+def synthesize_ogg_opus(text: str, settings: Settings, voice: Optional[str] = None, speed: Optional[float] = None) -> bytes:
     voice_code = (voice or settings.TTS_VOICE_DEFAULT or "en").lower()
     if voice_code == "ru":
         voice_path = settings.PIPER_VOICE_RU or settings.PIPER_VOICE_EN
     else:
         voice_path = settings.PIPER_VOICE_EN or settings.PIPER_VOICE_RU
 
-    wav_or_pcm = _run_piper(text, settings.PIPER_PATH or "piper", voice_path)
+    wav_or_pcm = _run_piper(text, settings.PIPER_PATH or "piper", voice_path, speed=speed)
     # Detect WAV header (RIFF .... WAVE)
     is_wav = len(wav_or_pcm) >= 12 and wav_or_pcm.startswith(b"RIFF") and (wav_or_pcm[8:12] == b"WAVE")
     if is_wav:
@@ -249,7 +255,7 @@ def synthesize_ogg_opus(text: str, settings: Settings, voice: Optional[str] = No
     return ogg
 
 
-def synthesize_wav(text: str, settings: Settings, voice: Optional[str] = None) -> bytes:
+def synthesize_wav(text: str, settings: Settings, voice: Optional[str] = None, speed: Optional[float] = None) -> bytes:
     """Directly synthesize WAV using Piper (no ffmpeg required).
     If Piper output is raw PCM, wrap it into a WAV container so browsers can play it.
     """
@@ -258,7 +264,7 @@ def synthesize_wav(text: str, settings: Settings, voice: Optional[str] = None) -
         voice_path = settings.PIPER_VOICE_RU or settings.PIPER_VOICE_EN
     else:
         voice_path = settings.PIPER_VOICE_EN or settings.PIPER_VOICE_RU
-    data = _run_piper(text, settings.PIPER_PATH or "piper", voice_path)
+    data = _run_piper(text, settings.PIPER_PATH or "piper", voice_path, speed=speed)
     # If it's already WAV, return as-is
     if len(data) >= 12 and data.startswith(b"RIFF") and (data[8:12] == b"WAVE"):
         return data

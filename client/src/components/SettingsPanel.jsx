@@ -1,10 +1,12 @@
-import React from 'react'
+import React, { useState } from 'react'
 import { useDispatch, useSelector } from 'react-redux'
 import { setEnableRag, setTtsVoice, setChunkMs } from '../slices/settingsSlice.js'
+import PromptSettingsModal from './PromptSettingsModal.jsx'
 
 export default function SettingsPanel() {
   const dispatch = useDispatch()
   const { enableRag, ttsVoice, chunkMs } = useSelector(s => s.settings)
+  const [showPromptModal, setShowPromptModal] = useState(false)
 
   return (
     <div className="card">
@@ -40,6 +42,12 @@ export default function SettingsPanel() {
           onChange={e => dispatch(setChunkMs(e.target.value))}
         />
       </div>
+
+      <button type="button" className="glass-input full" onClick={() => setShowPromptModal(true)}>
+        System Prompts & Memory
+      </button>
+
+      <PromptSettingsModal open={showPromptModal} onClose={() => setShowPromptModal(false)} />
     </div>
   )
 }

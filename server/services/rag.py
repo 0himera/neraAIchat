@@ -48,8 +48,9 @@ class RAGEngine:
         self._initialized = False
         self._index: Optional[faiss.Index] = None
         self._dimension: Optional[int] = None
-        self._chunks: List[Dict[str, Any]] = []
+        self._chunks: List[Dict[str, Any]] = []  # all chunk metadata
         self._docs: Dict[str, Dict[str, Any]] = {}
+        self._active_chunk_indices: List[int] = []
         self._settings_cache: Optional[Settings] = None
 
         base_dir = Path(__file__).resolve().parents[1]
@@ -128,11 +129,43 @@ class RAGEngine:
         }
 
     async def list_documents(self) -> List[Dict[str, Any]]:
-        return list(self._docs.values())
+        docs = []
+        for doc in self._docs.values():
+            item = dict(doc)
+            item.setdefault("enabled", True)
+            docs.append(item)
+        return docs
+
+    async def set_document_enabled(self, doc_id: str, enabled: bool) -> Dict[str, Any]:
+        async with self._lock:
+            doc = self._docs.get(doc_id)
+            if not doc:
+                raise ValueError("Document not found")
+            doc["enabled"] = bool(enabled)
+            await self._refresh_active_chunks()
+            await self._persist_state()
+            return dict(doc)
+
+    async def delete_document(self, doc_id: str) -> None:
+        async with self._lock:
+            doc = self._docs.get(doc_id)
+            if not doc:
+                raise ValueError("Document not found")
+            # Remove embeddings/chunks for doc
+            removed_indices = [i for i, chunk in enumerate(self._chunks) if chunk.get("doc_id") == doc_id]
+            if removed_indices:
+                self._chunks = [c for c in self._chunks if c.get("doc_id") != doc_id]
+                await self._refresh_active_chunks()
+            self._docs.pop(doc_id, None)
+            await self._persist_state()
+            # Remove stored file
+            stored_path = next(self._uploads_dir.glob(f"{doc_id}.*"), None)
+            if stored_path and stored_path.exists():
+                stored_path.unlink()
 
     async def query(self, query: str, settings: Settings, top_k: int = 5) -> List[RAGChunk]:
         await self.ensure_initialized(settings)
-        if not self._index or self._index.ntotal == 0:
+        if not self._index or self._index.ntotal == 0 or not self._active_chunk_indices:
             return []
 
         query_embedding = await self._embed_texts([query], settings)
@@ -145,9 +178,9 @@ class RAGEngine:
 
         results: List[RAGChunk] = []
         for score, chunk_idx in zip(scores[0], indices[0]):
-            if chunk_idx < 0 or chunk_idx >= len(self._chunks):
+            if chunk_idx < 0 or chunk_idx >= len(self._active_chunk_indices):
                 continue
-            chunk_meta = self._chunks[chunk_idx]
+            chunk_meta = self._chunks[self._active_chunk_indices[chunk_idx]]
             results.append(
                 RAGChunk(
                     chunk_id=chunk_meta["chunk_id"],
@@ -172,47 +205,51 @@ class RAGEngine:
         if self._settings_cache and len(self._docs) >= self._settings_cache.MAX_DOCS:
             raise ValueError("Document limit reached")
 
-        embeddings_list = list(embeddings)
+        chunk_texts = list(chunks)
+        embeddings_list = [list(vec) for vec in embeddings]
         if not embeddings_list:
             raise ValueError("Received empty embeddings")
 
         embeddings_array = np.asarray(embeddings_list, dtype="float32")
         if embeddings_array.ndim != 2:
             raise ValueError("Embedding tensor must be 2-dimensional")
-
+        if len(chunk_texts) != embeddings_array.shape[0]:
+            raise ValueError("Chunk and embedding counts mismatch")
         faiss.normalize_L2(embeddings_array)
+        normalized_embeddings = embeddings_array.tolist()
+
         dimension = embeddings_array.shape[1]
 
         async with self._lock:
-            self._ensure_index(dimension)
-            if not self._index:
-                raise RuntimeError("Vector index not initialized")
+            if self._dimension is None:
+                self._dimension = dimension
+            elif self._dimension != dimension:
+                raise ValueError("Embedding dimensionality mismatch with existing index")
 
-            self._index.add(embeddings_array)
+            for offset, text in enumerate(chunk_texts):
+                self._chunks.append(
+                    {
+                        "chunk_id": str(uuid.uuid4()),
+                        "doc_id": doc_id,
+                        "filename": filename,
+                        "text": text,
+                        "chunk_index": offset,
+                        "embedding": normalized_embeddings[offset],
+                    }
+                )
 
-            chunk_count = 0
-            for offset, text in enumerate(chunks):
-                chunk_id = str(uuid.uuid4())
-                meta = {
-                    "chunk_id": chunk_id,
-                    "doc_id": doc_id,
-                    "filename": filename,
-                    "text": text,
-                    "chunk_index": offset,
-                }
-                self._chunks.append(meta)
-                chunk_count += 1
+            chunk_count = len(normalized_embeddings)
 
             self._docs[doc_id] = {
                 "doc_id": doc_id,
                 "filename": filename,
                 "chunks": chunk_count,
                 "uploaded_at": uploaded_at,
+                "enabled": True,
             }
 
+            await self._refresh_active_chunks()
             await self._persist_state()
-
-        return chunk_count
 
     def _ensure_index(self, dimension: int) -> None:
         if self._index is None:
@@ -233,6 +270,7 @@ class RAGEngine:
                         self._dimension = data.get("dimension")
         if self._index_path.exists() and self._dimension:
             self._index = faiss.read_index(str(self._index_path))
+        await self._refresh_active_chunks(initial_load=True)
 
     async def _persist_state(self) -> None:
         payload = {
@@ -245,6 +283,43 @@ class RAGEngine:
             await meta_file.write(orjson.dumps(payload))
         if self._index is not None:
             faiss.write_index(self._index, str(self._index_path))
+
+    async def _refresh_active_chunks(self, *, initial_load: bool = False) -> None:
+        enabled_doc_ids = {doc_id for doc_id, meta in self._docs.items() if meta.get("enabled", True)}
+        self._active_chunk_indices = [i for i, meta in enumerate(self._chunks) if meta.get("doc_id") in enabled_doc_ids]
+        if self._dimension is None:
+            return
+        if self._index is None:
+            self._ensure_index(self._dimension)
+        if self._index is None:
+            return
+        if self._index is None:
+            return
+        self._index.reset()
+        if not self._active_chunk_indices:
+            return
+        await self._rebuild_index()
+
+    async def _rebuild_index(self) -> None:
+        if self._dimension is None or not self._active_chunk_indices:
+            self._index = faiss.IndexFlatIP(self._dimension or 0) if self._dimension else None
+            return
+        if self._index is None:
+            self._ensure_index(self._dimension)
+        if self._index is None:
+            return
+        embeddings: List[List[float]] = []
+        for idx in self._active_chunk_indices:
+            emb = self._chunks[idx].get("embedding")
+            if not emb:
+                continue
+            embeddings.append(emb)
+        if not embeddings:
+            return
+        embeddings_array = np.asarray(embeddings, dtype="float32")
+        faiss.normalize_L2(embeddings_array)
+        self._index.add(embeddings_array)
+
 
     def _extract_text(self, content: bytes, extension: str) -> str:
         if extension == ".pdf":

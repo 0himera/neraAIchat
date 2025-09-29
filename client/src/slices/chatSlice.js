@@ -20,6 +20,7 @@ const chatSlice = createSlice({
             role: 'user',
             text,
             created_at: new Date().toISOString(),
+            status: 'final',
           },
         }
       },
@@ -35,6 +36,7 @@ const chatSlice = createSlice({
             role: 'assistant',
             text,
             created_at: new Date().toISOString(),
+            status: 'streaming',
           },
         }
       },
@@ -52,7 +54,11 @@ const chatSlice = createSlice({
       }
     },
     setMessages(state, action) {
-      state.messages = action.payload || []
+      const items = Array.isArray(action.payload) ? action.payload : []
+      state.messages = items.map(msg => ({
+        ...msg,
+        status: msg?.status || (msg?.role === 'assistant' ? 'final' : 'final'),
+      }))
     },
     clearMessages(state) {
       state.messages = []
@@ -63,9 +69,16 @@ const chatSlice = createSlice({
       if (!msg || !msg.id) return
       const idx = state.messages.findIndex(m => m.id === msg.id)
       if (idx >= 0) {
-        state.messages[idx] = { ...state.messages[idx], ...msg }
+        state.messages[idx] = {
+          ...state.messages[idx],
+          ...msg,
+          status: msg.status || state.messages[idx].status || 'final',
+        }
       } else {
-        state.messages.push(msg)
+        state.messages.push({
+          ...msg,
+          status: msg.status || (msg.role === 'assistant' ? 'final' : 'final'),
+        })
       }
     },
     updateMessage(state, action) {
@@ -74,6 +87,14 @@ const chatSlice = createSlice({
       const msg = state.messages.find(m => m.id === id)
       if (!msg) return
       if (text !== undefined) msg.text = text
+    },
+    setMessageStatus(state, action) {
+      const { id, status } = action.payload || {}
+      if (!id || !status) return
+      const msg = state.messages.find(m => m.id === id)
+      if (msg) {
+        msg.status = status
+      }
     },
   },
 })
@@ -87,5 +108,6 @@ export const {
   clearMessages,
   upsertMessage,
   updateMessage,
+  setMessageStatus,
 } = chatSlice.actions
 export default chatSlice.reducer

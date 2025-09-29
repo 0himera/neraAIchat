@@ -95,6 +95,12 @@ async def ws_llm(ws: WebSocket):
             session_id = (payload.get("session_id") or "").strip()
             user_message_id = (payload.get("message_id") or "").strip() or None
             assistant_message_id = (payload.get("assistant_id") or "").strip() or None
+            system_prompt = (payload.get("system_prompt") or "").strip()
+            memory_notes = (payload.get("memory_notes") or "").strip()
+            if len(system_prompt) > 4000:
+                system_prompt = system_prompt[:4000]
+            if len(memory_notes) > 4000:
+                memory_notes = memory_notes[:4000]
             if not user_text:
                 await ws.send_json({"type": "error", "message": "empty input"})
                 continue
@@ -110,10 +116,14 @@ async def ws_llm(ws: WebSocket):
                 continue
 
             try:
-                append_result = await sessions_manager.append_message(
-                    session_id,
-                    {"role": "user", "text": user_text, "id": user_message_id} if user_message_id else {"role": "user", "text": user_text},
-                )
+                user_record = {"role": "user", "text": user_text}
+                if user_message_id:
+                    user_record["id"] = user_message_id
+                if system_prompt:
+                    user_record["system_prompt"] = system_prompt
+                if memory_notes:
+                    user_record["memory_notes"] = memory_notes
+                append_result = await sessions_manager.append_message(session_id, user_record)
                 await ws.send_json({"type": "session_update", "session": append_result["session"], "message": append_result["message"]})
             except Exception as e:
                 logger.exception("/ws/llm failed to persist user message: %s", e)
@@ -133,7 +143,13 @@ async def ws_llm(ws: WebSocket):
                 logger.info("/ws/llm streaming start: model=%s url=%s", settings.LLM_MODEL, settings.OPENROUTER_API_URL)
                 assistant_reply = ""
                 stream_ok = True
-                async for token in stream_chat(user_text, settings, context_chunks=context_chunks):
+                async for token in stream_chat(
+                    user_text,
+                    settings,
+                    context_chunks=context_chunks,
+                    system_prompt=system_prompt or None,
+                    memory_notes=memory_notes or None,
+                ):
                     if token:
                         assistant_reply += token
                         if not await safe_send_json({"type": "token", "text": token}):
@@ -186,6 +202,7 @@ async def ws_tts(ws: WebSocket):
 
             text = (payload.get("text") or "").strip()
             voice = (payload.get("voice") or settings.TTS_VOICE_DEFAULT).strip().lower()
+            speed = payload.get("speed")
             if not text:
                 await ws.send_json({"type": "error", "message": "empty text"})
                 continue
@@ -194,7 +211,7 @@ async def ws_tts(ws: WebSocket):
             logger.info("/ws/tts synth start (WAV-only): voice=%s path_piper=%s voice_en=%s voice_ru=%s", voice, settings.PIPER_PATH, getattr(settings, "PIPER_VOICE_EN", None), getattr(settings, "PIPER_VOICE_RU", None))
             try:
                 await ws.send_json({"type": "start", "codec": "audio/wav"})
-                wav_bytes = await asyncio.to_thread(synthesize_wav, text, settings, voice)
+                wav_bytes = await asyncio.to_thread(synthesize_wav, text, settings, voice, speed)
                 size = len(wav_bytes) if wav_bytes else 0
                 logger.info("/ws/tts wav bytes=%d", size)
                 if size <= 0:

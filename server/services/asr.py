@@ -2,15 +2,23 @@ from __future__ import annotations
 
 import asyncio
 import io
+import logging
+import os
 import subprocess
 import wave
 from functools import lru_cache
 from typing import Optional
 
+if os.getenv("KMP_DUPLICATE_LIB_OK") is None:
+    os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
 import numpy as np
 from faster_whisper import WhisperModel
 
 from ..config import Settings
+
+
+logger = logging.getLogger(__name__)
 
 
 def decode_opus_to_wav_bytes(opus_bytes: bytes, ffmpeg_path: Optional[str]) -> bytes:
@@ -56,13 +64,10 @@ def wav_bytes_to_f32_mono(wav_bytes: bytes) -> np.ndarray:
     return audio
 
 
-@lru_cache(maxsize=1)
-def _load_model(model_size: str) -> WhisperModel:
-    # Try CUDA first, then CPU fallback
-    try:
-        return WhisperModel(model_size, device="cuda", compute_type="float16")
-    except Exception:
-        return WhisperModel(model_size, device="cpu", compute_type="int8")
+@lru_cache(maxsize=4)
+def _load_model(model_size: str, device: str) -> WhisperModel:
+    compute_type = "float16" if device == "cuda" else "int8"
+    return WhisperModel(model_size, device=device, compute_type=compute_type)
 
 
 async def transcribe_opus(opus_bytes: bytes, settings: Settings) -> str:
@@ -71,7 +76,32 @@ async def transcribe_opus(opus_bytes: bytes, settings: Settings) -> str:
     wav_bytes = await asyncio.to_thread(decode_opus_to_wav_bytes, opus_bytes, settings.__dict__.get("FFMPEG_PATH"))
     audio = wav_bytes_to_f32_mono(wav_bytes)
 
-    model = await asyncio.to_thread(_load_model, settings.ASR_MODEL)
+    desired = (getattr(settings, "WHISPER_DEVICE", "auto") or "auto").lower()
+    if desired not in {"auto", "cuda", "cpu"}:
+        logger.warning("Invalid WHISPER_DEVICE '%s'; falling back to auto", desired)
+        desired = "auto"
+
+    device_priority = ["cuda", "cpu"]
+    if desired == "cpu":
+        device_priority = ["cpu"]
+    elif desired == "cuda":
+        device_priority = ["cuda", "cpu"]
+
+    model = None
+    last_error: Optional[Exception] = None
+    for device in device_priority:
+        try:
+            model = await asyncio.to_thread(_load_model, settings.ASR_MODEL, device)
+            if device != desired and desired != "auto":
+                logger.info("Whisper model loaded on %s after falling back from %s", device, desired)
+            break
+        except Exception as exc:
+            last_error = exc
+            logger.warning("Whisper model load failed on %s: %s", device, exc)
+            continue
+
+    if model is None:
+        raise RuntimeError("Failed to load Whisper model") from last_error
 
     # Run transcription in a worker thread
     def _do_transcribe() -> str:

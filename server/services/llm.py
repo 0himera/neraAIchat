@@ -13,7 +13,7 @@ from .rag import RAGChunk
 
 SYSTEM_PROMPT = (
     "You are an intelligent friend. Respond concisely and naturally, with clear reasoning. "
-    "When using external document snippets, integrate them smoothly and cite as [Source: filename.pdf, page X]. "
+    "When using external document snippets, integrate them smoothly. "
     "If you don't know, say so. Avoid robotic tone."
 )
 
@@ -41,6 +41,8 @@ async def stream_chat(
     settings: Settings,
     *,
     context_chunks: Sequence[RAGChunk] | None = None,
+    system_prompt: str | None = None,
+    memory_notes: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """
     Proxy streamed chat completion from OpenRouter and yield text tokens.
@@ -68,9 +70,14 @@ async def stream_chat(
         "X-Title": "NeraAIchat",
     }
 
+    base_prompt = (system_prompt or SYSTEM_PROMPT).strip() or SYSTEM_PROMPT
     messages: list[dict[str, str]] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": base_prompt},
     ]
+    if memory_notes:
+        memory_blob = memory_notes.strip()
+        if memory_blob:
+            messages.append({"role": "system", "content": f"Conversation memory guidelines:\n{memory_blob}"})
     if context_chunks:
         context_blob = _format_rag_context(context_chunks)
         if context_blob:

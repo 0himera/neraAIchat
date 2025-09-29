@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import List
 
 import httpx
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Path, Query, UploadFile, status
 
 from ..config import Settings
 from ..services.rag import RAGChunk, rag_engine
@@ -49,3 +49,28 @@ async def search_documents(
     await rag_engine.ensure_initialized(settings)
     chunks = await rag_engine.query(query, settings, top_k=top_k)
     return [chunk.to_dict() for chunk in chunks]
+
+
+@router.patch("/documents/{doc_id}", response_model=dict)
+async def update_document(
+    doc_id: str = Path(..., description="Document identifier"),
+    enabled: bool = Query(..., description="Enable (true) or disable (false) document for retrieval"),
+    settings: Settings = Depends(get_settings),
+):
+    await rag_engine.ensure_initialized(settings)
+    try:
+        return await rag_engine.set_document_enabled(doc_id, enabled)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@router.delete("/documents/{doc_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_document(
+    doc_id: str = Path(..., description="Document identifier"),
+    settings: Settings = Depends(get_settings),
+):
+    await rag_engine.ensure_initialized(settings)
+    try:
+        await rag_engine.delete_document(doc_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
